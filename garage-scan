@@ -1,0 +1,424 @@
+#!/bin/bash
+
+# DEBUG. on=1, 2=off 3=echo 
+DEBUG=3
+DEBUGFILE="/var/log/garage-scanner.log"
+if [ ! -e $DEBUGFILE ]; then
+	touch $DEBUGFILE
+fi
+
+
+# Look for required scripts
+SCRIPTROOT=/scripts
+BEACON=beacon
+USBRESET=usbreset
+GPIO=gpio
+
+# Door State. 1=closed 0=open
+GARAGE_STATE=1
+
+# Wait till the beacon has left home. monitor=1   dont monitor=0
+MONITOR=1
+
+# Usb device description.
+# use the lsusb to get the actual name or id of the device
+#DEVICE_NAME='0a12:0001'
+DEVICE_NAME='Bluetooth'
+
+# What is the BEACON_UID_ of the device you need to look for
+BEACON_UID_FILE=garage_scanner_uid_2.txt
+#BEACON_UID_FILE=garage_scanner_uid.txt
+BEACON_UID=''
+BEACON_MAJOR=''
+BEACON_MINOR=''
+
+# Whether the beacon was found and is at home
+BEACON_HOME=0
+
+# Duration of scan
+DURATION=4
+
+# Beacon Scan Command options
+#BEACON_OPTIONS="-i hci0 scan -I -d $DURATION -b"
+
+BT_STATUS=0
+BT_COUNTER=0
+BT_RESET=0
+
+
+CURRENT_UID=''
+CURRENT_MAJOR=''
+CURRENT_MINOR=''
+CURRENT_RSSI=''
+
+# using wiringPi on Raspberry Pi from Gordons source http://wiringpi.com/
+command -v $GPIO >/dev/null 2>&1 || { echo >&2 "I require $GPIO (wiringPi) but it's not installed.  Aborting."; exit 1; }
+
+# Using https://gist.github.com/x2q/5124616
+command -v $USBRESET >/dev/null 2>&1 || { echo >&2 "I require /usr/local/sbin/$USBRESET but it's not installed.  Aborting."; exit 1; }
+
+# Use apt-get install usbutils
+command -v lsusb >/dev/null 2>&1 || { echo >&2 "I require lsusb but it's not installed.  Aborting."; exit 1; }
+
+# Beacon uid file must be in the format. No dashes all lowercase. See example in this repository
+# [uid] [major] [minor]
+if [ ! -f $SCRIPTROOT/$BEACON_UID_FILE ]; then
+	echo "Cannot find: $SCRIPTROOT/$BEACON_UID_FILE. Aborting"
+	exit 1
+else
+	data=$(< $SCRIPTROOT/$BEACON_UID_FILE)
+
+	BEACON_UID=$(echo $data | awk '{print $1}')
+	#remove commas
+	BEACON_UID=${BEACON_UID,,}
+	BEACON_MAJOR=$(echo $data | awk '{print $2}')
+	BEACON_MINOR=$(echo $data | awk '{print $3}')
+		
+fi
+
+# Python script to scan for Bt le devices
+# relies on blescan.py. Must be in the same dir
+PY_SCAN="$SCRIPTROOT/testblescan.py"
+if [ ! -e $PY_SCAN ]; then
+	echo "Cannot find $PY_SCAN. Aborting"
+	exit
+fi
+PY_BLESCAN="$SCRIPTROOT/blescan.py"
+if [ ! -e $PY_BLESCAN ]; then
+	echo "Cannot find $PY_BLESCAN. Aborting"
+	exit
+fi
+
+# Garage Open Trigger 1=on 0=off. see TriggerGarage()
+SCAN_FILE='/var/www/public_html/scanstate.txt'
+if [ ! -e $SCAN_FILE ]; then
+#	echo "Cannot find $SCAN_FILE. Making file."
+	echo "0" > $SCAN_FILE
+fi
+
+
+# Get the state of the garage. 1=closed 0=open
+GARAGE_STATE=$($GPIO read 0)
+
+
+# trap handler: print location of last error and process it further
+#
+function my_trap_handler()
+{
+        MYSELF="$0"              # equals to my script name
+        LASTLINE="$1"            # argument 1: last line of error occurence
+        LASTERR="$2"             # argument 2: error code of last command
+        echo "${MYSELF}: line ${LASTLINE}: exit status of last command: ${LASTERR}"
+
+        # do additional processing: send email or SNMP trap, write result to database, etc.
+}
+
+# trap commands with non-zero exit code
+#
+trap 'my_trap_handler ${LINENO} $?' ERR
+
+
+
+
+# ECHO DEBUG commands
+function debug () {
+
+	if [ $DEBUG -eq 1 ]; then
+		now=$(date +"%m-%d-%Y %T")
+		echo -e "[$now] $1" >> $DEBUGFILE
+	elif [ $DEBUG -eq 3 ]; then
+		echo -e "$1"
+	fi
+}
+
+
+# Manage log file size
+function manageLogSize () {
+
+	if [[ -f "$DEBUGFILE" ]]; then
+		size=$(stat --printf="%s" $DEBUGFILE)
+		if [ $size -gt 100000 ]; then
+			tail -130 $DEBUGFILE > /var/log/garage-scanner.new
+			mv /var/log/garage-scanner.new $DEBUGFILE;
+		fi
+	else
+		touch $DEBUGFILE
+	fi
+}
+
+
+
+function resetDevice() {
+
+	device=$(lsusb | grep "$DEVICE_NAME")
+	if [ -z "$device" ]; then
+		debug "Is the bluetooth device: $DEVICE_NAME plugged in? Aborting."
+		exit 1
+	fi
+	btbus=$(echo $device | awk '{print $2}')
+	btdev=$(echo $device | awk '{print $4}')
+	btdev="${btdev%:}"
+
+	loc="/dev/bus/usb/$btbus/$btdev"
+	#debug "Resetting device at $loc"
+	debug "Reset Device   :$DEVICE_NAME $loc"
+
+	if [ -e $loc ]; then
+		#debug "usbreset $loc"
+		usbreset $loc
+	fi
+	BT_RESET=1
+
+
+}
+
+# Check if the BT Device is ON and UP RUNNING
+function enableBT() {
+
+	BT_STATUS=1
+	BT_RESET=0
+	while true
+	do
+		BT_RESULT=$(hciconfig hci0 | grep 'UP')
+
+		# if hci0 is DOWN
+		if [ -z "$BT_RESULT" ]; then
+
+			debug "Device         :DOWN"
+
+			# if an early exit AND has not been reset, try resetting
+			if [ "$?" -ne "0" ] && [ $BTRESET -eq 0 ]; then
+
+				resetDevice
+
+			# else try and set to running
+			else
+
+				debug "Setting Device :UP RUNNING"
+				`hciconfig hci0 up`
+				`hciconfig hci0 iscan`
+
+				# if eraly exit in running then RESET
+				if [ "$?" -ne "0" ]; then
+					
+					resetDevice
+					
+				fi
+			fi
+		else
+			debug "Device         :UP"
+			BT_STATUS=0
+			break
+		fi
+	done
+
+}
+
+
+
+# power up the bluetooth dongle
+function startBT() {
+
+	BTCOUNTER=0
+	# Start the BT device
+	while true; do
+
+		checkBT
+		if [ $BT_STATUS -eq 0 ]; then
+			debug "Device Status  :Running OK"
+			break
+		else
+
+			if [ $BT_COUNTER -lt 3 ]; then
+			#if [ $BT_RESET -eq 0 ]; then
+				device=$(lsusb | grep "$DEVICE_NAME")
+				if [ -z "$device" ]; then
+					debug "Is the bluetooth device: $DEVICE_NAME plugged in? Aborting."
+					exit
+				fi
+				btbus=$(echo $device | awk '{print $2}')
+				btdev=$(echo $device | awk '{print $4}')
+				btdev="${btdev%:}"
+
+				loc="/dev/bus/usb/$btbus/$btdev"
+				debug "Reset Device   :$DEVICE_NAME $loc"
+
+				if [ -e $loc ]; then
+					#debug "usbreset $loc"
+					usbreset $loc
+				fi
+
+				#debug "Setting UP     :$DEVICE_NAME"
+				debug "Device Set to  :UP RUNNING"
+				`hciconfig hci0 up`
+				`hciconfig hci0 iscan`
+
+				#BT_RESET=1
+				BT_COUNTER+=1
+			#else
+			#	debug "Bluetooth Deivce: $DEVICE_NAME is not responding. Aborting."
+			#	exit
+			#fi
+			fi
+		fi
+
+	done
+
+}
+
+# scan for a specific device
+function scanForDevice() {
+
+	FOUND=''
+	RESULTS=''
+    BEACON_HOME=0
+
+	while true
+	do
+		if [ $MONITOR -eq 0 ]; then
+			DURATION="2"
+		else
+			DURATION="3"
+		fi
+		#debug "Running        :$BEACON -i hci0 scan -I -d $DURATION -b"
+		debug "Running        :python $PY_SCAN"
+		debug "Beacon         :Scanning..."
+		#RESULTS=$($BEACON -i hci0 scan -I -d $DURATION -b)
+		RESULTS=$(python $PY_SCAN)
+		if [ "$?" -eq "0" ]; then
+			break
+		fi
+		resetDevice
+		enableBT
+	done
+
+    while read -r line; do
+
+        #FOUND=$(echo "$line" | grep "$BEACON_UID $BEACON_MAJOR $BEACON_MINOR")
+		
+		#Sample output from testblescan.py
+		# c6:b3:ee:18:14:e7,f7826da64fa24e988024bc5b71e0893e,20029,21297,-77,-90
+		line=${line,,}    # convert to lower case
+		FOUND=$(echo "$line" | grep "$BEACON_UID,$BEACON_MAJOR,$BEACON_MINOR")
+        if [ ! -z "$FOUND" ]; then
+            #result line ie. E2C56DB5-DFFB-48D2-B060-D0F5A71096E0 0 0 -59 -81 --> UID MAJOR MINOR POWER RSSI
+            #parce the results, all the matches up to the last one, to get the closest RSSI
+
+            CURRENT_UID=$(echo "$line" | awk -F"," '{print $2}')
+            CURRENT_MAJOR=$(echo "$line" | awk -F"," '{print $3}')
+            CURRENT_MINOR=$(echo "$line" | awk -F"," '{print $4}')
+            #CURRENT_RSSI=$(echo "$line" | awk '{print $5}')
+			debug "Found Beacon   :$CURRENT_UID"
+			debug "Major/Minor    :$CURRENT_MAJOR/$CURRENT_MINOR"
+			#debug "Found: $CURRENT_UID, MJR: $CURRENT_MAJOR, MNR: CURRENT_MINOR, RSSI: $CURRENT_RSSI"
+            BEACON_HOME=1
+			break
+		#else
+		#	debug "$line - NO MATCH"
+		fi
+		
+    done <<< "$RESULTS"
+	if [ -z "$FOUND" ]; then
+		debug "Beacon         :NOT Found"
+	fi
+}
+
+
+function triggerGarage() {
+
+	ALERT=$(< $SCAN_FILE)
+
+	if [ "$ALERT" = "1" ]; then
+		debug "Garage Door    :Trigger"
+		# send the TRIGGER DOWN/ON gpio command to pin number 7
+		`gpio write 7 0`
+		sleep 1;    # 1 second
+		# send the TRIGGER UP/OFF gpio command to pin number 7
+		`gpio write 7 1`
+		sleep 1    # 1 second
+		# read the state gpio pin wiringPi number 0 (GPIO 0 - Physical Pin No. 11)
+		#$output['doorstate']=exec('gpio read 0');
+	else
+		debug "Garage Door    :Not Triggered. Skipped"
+	fi
+
+
+}
+
+
+function getGarageState() {
+
+	GARAGE_STATE=$(gpio read 0)
+	if [ $GARAGE_STATE -eq 1 ]; then
+		debug "Garage Door    :Closed"
+	else
+		debug "Garage Door    :Open"
+	fi
+
+
+}
+
+
+# -------------------Start ----------------
+
+while true; do
+	#BT_RESET=0
+	enableBT
+	scanForDevice
+
+
+	#if [ $MONITOR -eq 0 ]; then
+	#	debug "Not Monitoring :$MONITOR"
+	#else
+		debug "Monitoring     :$MONITOR"
+	#fi
+	#if [ $BEACON_HOME -eq 0 ]; then
+	#	debug "Car Absent     :$BEACON_HOME"
+	#else
+		debug "Car Home       :$BEACON_HOME"
+	#fi
+
+
+	# if beacon is home and garage is closed and not monitoring
+	if [ $MONITOR -eq 0 ] && [ $BEACON_HOME -eq 1 ]; then
+
+		getGarageState
+		# If the garage state is closed(1) then open it
+		if [ $GARAGE_STATE -eq 1 ]; then
+		    #open the garage
+			triggerGarage
+		fi
+		MONITOR=1
+		
+	# if beacon is not home and garage is open and monitoring
+	elif [ $MONITOR -eq 1 ] && [ $BEACON_HOME -eq 0 ]; then
+
+		getGarageState
+		# If the garage state is open(0) then close it
+		if [ $GARAGE_STATE -eq 0 ]; then
+		    #open the garage
+			triggerGarage
+		fi
+		MONITOR=0
+
+	fi
+		
+
+
+#    if [ $BEACON_HOME -eq 1 ] && [ $WAIT=0 ]; then
+#		getGarageState
+#		# If the garage state is closed(1) then open it
+#		if [ $GARAGE_STATE -eq 1 ]; then
+#		    #open the garage
+#			triggerGarage
+#			WAIT=1
+#		fi
+#    fi
+#	sleep 1
+	manageLogSize
+	sleep 1
+	
+done
+
+
+exit 0
