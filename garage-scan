@@ -25,7 +25,9 @@ MONITOR=1
 #DEVICE_NAME='0a12:0001'
 DEVICE_NAME='Bluetooth'
 
-# What is the BEACON_UID_ of the device you need to look for
+# What is the BEACON_UID_ of the device you need to scan for
+# Format in file must be [uid no space or dashes] [major] [minor]
+# ie. F7826DA64FA24E988024BC5B71E0893E 100 20
 BEACON_UID_FILE=garage_scanner_uid_2.txt
 #BEACON_UID_FILE=garage_scanner_uid.txt
 BEACON_UID=''
