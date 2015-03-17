@@ -1,18 +1,11 @@
 #!/bin/bash
 
-# DEBUG. on=1, 2=off 3=echo 
-DEBUG=3
-DEBUGFILE="/var/log/garage-scanner.log"
-if [ ! -e $DEBUGFILE ]; then
-	touch $DEBUGFILE
-fi
+# Author Daddyfix <daddyfix@outlook.com>
 
-
-# Look for required scripts
-SCRIPTROOT=/scripts
-BEACON=beacon
-USBRESET=usbreset
-GPIO=gpio
+CURRDIR=`pwd`
+CONFIG="$CURRDIR/garage-scan.conf"
+if [ ! -f $CONFIG ]; then echo -e "$CONFIG config file not found!"; exit; fi
+source $CONFIG
 
 # Door State. 1=closed 0=open
 GARAGE_STATE=1
@@ -20,16 +13,6 @@ GARAGE_STATE=1
 # Wait till the beacon has left home. monitor=1   dont monitor=0
 MONITOR=1
 
-# Usb device description.
-# use the lsusb to get the actual name or id of the device
-#DEVICE_NAME='0a12:0001'
-DEVICE_NAME='Bluetooth'
-
-# What is the BEACON_UID_ of the device you need to scan for
-# Format in file must be [uid no space or dashes] [major] [minor]
-# ie. F7826DA64FA24E988024BC5B71E0893E 100 20
-BEACON_UID_FILE=garage_scanner_uid_2.txt
-#BEACON_UID_FILE=garage_scanner_uid.txt
 BEACON_UID=''
 BEACON_MAJOR=''
 BEACON_MINOR=''
@@ -53,17 +36,12 @@ CURRENT_MAJOR=''
 CURRENT_MINOR=''
 CURRENT_RSSI=''
 
-# using wiringPi on Raspberry Pi from Gordons source http://wiringpi.com/
+
+command -v $BEACON >/dev/null 2>&1 || { echo >&2 "I require /usr/local/sbin/$BEACON but it's not installed.  Aborting."; exit 1; }
 command -v $GPIO >/dev/null 2>&1 || { echo >&2 "I require $GPIO (wiringPi) but it's not installed.  Aborting."; exit 1; }
-
-# Using https://gist.github.com/x2q/5124616
 command -v $USBRESET >/dev/null 2>&1 || { echo >&2 "I require /usr/local/sbin/$USBRESET but it's not installed.  Aborting."; exit 1; }
-
-# Use apt-get install usbutils
 command -v lsusb >/dev/null 2>&1 || { echo >&2 "I require lsusb but it's not installed.  Aborting."; exit 1; }
 
-# Beacon uid file must be in the format. No dashes all lowercase. See example in this repository
-# [uid] [major] [minor]
 if [ ! -f $SCRIPTROOT/$BEACON_UID_FILE ]; then
 	echo "Cannot find: $SCRIPTROOT/$BEACON_UID_FILE. Aborting"
 	exit 1
@@ -71,28 +49,22 @@ else
 	data=$(< $SCRIPTROOT/$BEACON_UID_FILE)
 
 	BEACON_UID=$(echo $data | awk '{print $1}')
-	#remove commas
 	BEACON_UID=${BEACON_UID,,}
 	BEACON_MAJOR=$(echo $data | awk '{print $2}')
 	BEACON_MINOR=$(echo $data | awk '{print $3}')
 		
 fi
 
-# Python script to scan for Bt le devices
-# relies on blescan.py. Must be in the same dir
-PY_SCAN="$SCRIPTROOT/testblescan.py"
 if [ ! -e $PY_SCAN ]; then
 	echo "Cannot find $PY_SCAN. Aborting"
 	exit
 fi
-PY_BLESCAN="$SCRIPTROOT/blescan.py"
+
 if [ ! -e $PY_BLESCAN ]; then
 	echo "Cannot find $PY_BLESCAN. Aborting"
 	exit
 fi
 
-# Garage Open Trigger 1=on 0=off. see TriggerGarage()
-SCAN_FILE='/var/www/public_html/scanstate.txt'
 if [ ! -e $SCAN_FILE ]; then
 #	echo "Cannot find $SCAN_FILE. Making file."
 	echo "0" > $SCAN_FILE
