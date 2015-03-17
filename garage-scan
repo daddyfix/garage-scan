@@ -229,10 +229,6 @@ function startBT() {
 
 				#BT_RESET=1
 				BT_COUNTER+=1
-			#else
-			#	debug "Bluetooth Deivce: $DEVICE_NAME is not responding. Aborting."
-			#	exit
-			#fi
 			fi
 		fi
 
@@ -340,18 +336,8 @@ while true; do
 	enableBT
 	scanForDevice
 
-
-	#if [ $MONITOR -eq 0 ]; then
-	#	debug "Not Monitoring :$MONITOR"
-	#else
-		debug "Monitoring     :$MONITOR"
-	#fi
-	#if [ $BEACON_HOME -eq 0 ]; then
-	#	debug "Car Absent     :$BEACON_HOME"
-	#else
-		debug "Car Home       :$BEACON_HOME"
-	#fi
-
+	debug "Monitoring     :$MONITOR"
+	debug "Car Home       :$BEACON_HOME"
 
 	# if beacon is home and garage is closed and not monitoring
 	if [ $MONITOR -eq 0 ] && [ $BEACON_HOME -eq 1 ]; then
@@ -377,18 +363,6 @@ while true; do
 
 	fi
 		
-
-
-#    if [ $BEACON_HOME -eq 1 ] && [ $WAIT=0 ]; then
-#		getGarageState
-#		# If the garage state is closed(1) then open it
-#		if [ $GARAGE_STATE -eq 1 ]; then
-#		    #open the garage
-#			triggerGarage
-#			WAIT=1
-#		fi
-#    fi
-#	sleep 1
 	manageLogSize
 	sleep 1
 	
